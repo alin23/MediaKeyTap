@@ -45,7 +45,7 @@ public class MediaKeyTap {
     public var started: Bool {
         mediaApplicationWatcher.started
     }
-    
+
     public static var useAlternateBrightnessKeys: Bool = true
     weak var delegate: MediaKeyTapDelegate!
     let mediaApplicationWatcher: MediaApplicationWatcher
@@ -93,6 +93,19 @@ public class MediaKeyTap {
     }
 
     /// Start the key tap
+    open func startWithError() throws {
+        mediaApplicationWatcher.delegate = self
+        mediaApplicationWatcher.start()
+
+        internals.delegate = self
+        do {
+            try internals.startWatchingMediaKeys()
+        } catch let error as EventTapError {
+            mediaApplicationWatcher.stop()
+            throw error
+        }
+    }
+
     open func start() {
         mediaApplicationWatcher.delegate = self
         mediaApplicationWatcher.start()
