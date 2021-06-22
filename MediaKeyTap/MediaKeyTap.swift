@@ -42,6 +42,10 @@ public protocol MediaKeyTapDelegate: AnyObject {
 }
 
 public class MediaKeyTap {
+    public var started: Bool {
+        mediaApplicationWatcher.started
+    }
+    
     public static var useAlternateBrightnessKeys: Bool = true
     weak var delegate: MediaKeyTapDelegate!
     let mediaApplicationWatcher: MediaApplicationWatcher

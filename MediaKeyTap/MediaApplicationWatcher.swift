@@ -16,6 +16,7 @@ protocol MediaApplicationWatcherDelegate: AnyObject {
 }
 
 class MediaApplicationWatcher {
+    var started = false
     var mediaApps: [NSRunningApplication]
     weak var delegate: MediaApplicationWatcherDelegate?
 
@@ -36,6 +37,8 @@ class MediaApplicationWatcher {
     }
 
     func start() {
+        started = true
+
         let notificationCenter = NSWorkspace.shared.notificationCenter
 
         notificationCenter.addObserver(
@@ -63,6 +66,7 @@ class MediaApplicationWatcher {
     }
 
     func stop() {
+        started = false
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
