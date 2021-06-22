@@ -42,6 +42,7 @@ public protocol MediaKeyTapDelegate: AnyObject {
 }
 
 public class MediaKeyTap {
+    var retryTask: Timer? = nil
     public var started: Bool {
         mediaApplicationWatcher.started
     }
@@ -93,20 +94,10 @@ public class MediaKeyTap {
     }
 
     /// Start the key tap
-    open func startWithError() throws {
-        mediaApplicationWatcher.delegate = self
-        mediaApplicationWatcher.start()
+    open func start(tries: Int = 1) {
+        retryTask?.invalidate()
+        var tryNum = 1
 
-        internals.delegate = self
-        do {
-            try internals.startWatchingMediaKeys()
-        } catch let error as EventTapError {
-            mediaApplicationWatcher.stop()
-            throw error
-        }
-    }
-
-    open func start() {
         mediaApplicationWatcher.delegate = self
         mediaApplicationWatcher.start()
 
@@ -116,7 +107,26 @@ public class MediaKeyTap {
         } catch let error as EventTapError {
             mediaApplicationWatcher.stop()
             print(error.description)
-        } catch {}
+
+            guard tries != 1 else { return }
+            retryTask = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+
+                tryNum += 1
+
+                self.mediaApplicationWatcher.start()
+                do { try self.internals.startWatchingMediaKeys() } catch is EventTapError { self.mediaApplicationWatcher.stop() } catch {}
+
+                if tryNum > tries {
+                    timer.invalidate()
+                }
+            }
+        } catch {
+            print(error)
+        }
     }
 
     /// Stop the key tap

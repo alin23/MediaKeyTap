@@ -4,6 +4,9 @@ import PackageDescription
 
 let package = Package(
     name: "MediaKeyTap",
+    platforms: [
+        .macOS(.v10_15),
+    ],
     products: [
         .library(name: "MediaKeyTap", targets: ["MediaKeyTap"]),
     ],
