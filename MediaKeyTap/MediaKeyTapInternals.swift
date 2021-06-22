@@ -33,7 +33,7 @@ func mainScreen() -> NSScreen? {
     return screenWithMouse
 }
 
-protocol MediaKeyTapInternalsDelegate: class {
+protocol MediaKeyTapInternalsDelegate: AnyObject {
     var keysToWatch: [MediaKey] { get set }
     var observeBuiltIn: Bool { get set }
     func updateInterceptMediaKeys(_ intercept: Bool)
@@ -188,7 +188,7 @@ class MediaKeyTapInternals {
         return CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: CGEventMask(1 << NX_KEYDOWN) | CGEventMask(1 << NX_SYSDEFINED),
             callback: cCallback,
             userInfo: refcon
