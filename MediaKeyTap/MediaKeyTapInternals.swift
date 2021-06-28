@@ -188,7 +188,7 @@ class MediaKeyTapInternals {
         return CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(1 << NX_KEYDOWN) | CGEventMask(1 << NX_SYSDEFINED),
             callback: cCallback,
             userInfo: refcon
