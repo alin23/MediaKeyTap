@@ -15,7 +15,7 @@ protocol MediaApplicationWatcherDelegate: AnyObject {
     func whitelistedAppStarted()
 }
 
-final class MediaApplicationWatcher: Sendable {
+class MediaApplicationWatcher {
     var started = false
     var mediaApps: [NSRunningApplication]
     weak var delegate: MediaApplicationWatcherDelegate?
@@ -95,7 +95,7 @@ final class MediaApplicationWatcher: Sendable {
                 self.dynamicWhitelist.insert(otherBundleIdentifier)
 
                 // Send a reply so that the sender knows that this app exists
-                DistributedNotificationCenter.default().postNotificationName(
+                distributedNotificationCenter.postNotificationName(
                     NSNotification.Name(rawValue: self.mediaKeyTapReplyNotification),
                     object: ownBundleIdentifier,
                     userInfo: nil,

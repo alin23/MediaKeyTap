@@ -41,7 +41,7 @@ public protocol MediaKeyTapDelegate: AnyObject {
     func handle(mediaKey: MediaKey, event: KeyEvent?, modifiers: NSEvent.ModifierFlags?, event: CGEvent) -> CGEvent?
 }
 
-public final class MediaKeyTap: Sendable {
+public class MediaKeyTap {
     var retryTask: Timer? = nil
     public var started: Bool {
         mediaApplicationWatcher.started
@@ -89,13 +89,14 @@ public final class MediaKeyTap: Sendable {
     }
 
     /// Activate the currently running application
-    public func activate() {
+    open func activate() {
         mediaApplicationWatcher.activate()
     }
 
     /// Start the key tap
-    public func start(tries: Int = 1) {
+    open func start(tries: Int = 1) {
         retryTask?.invalidate()
+        var tryNum = 1
 
         mediaApplicationWatcher.delegate = self
         mediaApplicationWatcher.start()
@@ -114,9 +115,7 @@ public final class MediaKeyTap: Sendable {
                     return
                 }
 
-                var tryNum = (Thread.current.threadDictionary["mediaKeyTapTryNum"] as? Int) ?? 1
                 tryNum += 1
-                Thread.current.threadDictionary["mediaKeyTapTryNum"] = tryNum
 
                 self.mediaApplicationWatcher.start()
                 do { try self.internals.startWatchingMediaKeys() } catch is EventTapError { self.mediaApplicationWatcher.stop() } catch {}
@@ -131,7 +130,7 @@ public final class MediaKeyTap: Sendable {
     }
 
     /// Stop the key tap
-    public func stop() {
+    open func stop() {
         mediaApplicationWatcher.stop()
         internals.stopWatchingMediaKeys()
 

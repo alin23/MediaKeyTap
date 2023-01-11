@@ -41,25 +41,30 @@ protocol MediaKeyTapInternalsDelegate: AnyObject {
     func isInterceptingMediaKeys() -> Bool
 }
 
-final class MediaKeyTapInternals: Sendable {
-    deinit {
-        stopWatchingMediaKeys()
-    }
-
+class MediaKeyTapInternals {
     typealias EventTapCallback = @convention(block) (CGEventType, CGEvent) -> CGEvent?
 
     weak var delegate: MediaKeyTapInternalsDelegate?
     var keyEventPort: CFMachPort?
+    var runLoopSource: CFRunLoopSource?
     var callback: EventTapCallback?
-    var runLoopQueue = DispatchQueue(label: "MediaKeyTap Runloop", qos: .userInteractive)
+    var runLoopQueue: DispatchQueue?
+    var runLoop: CFRunLoop?
+
+    deinit {
+        stopWatchingMediaKeys()
+    }
 
     /**
      Enable/Disable the underlying tap
      */
     func enableTap(_ onOff: Bool) {
-        RunLoop.current.perform(inModes: [.common]) { [weak self] in
-            guard let port = self?.keyEventPort else { return }
-            CGEvent.tapEnable(tap: port, enable: onOff)
+        if keyEventPort != nil, let runLoop = self.runLoop {
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes as CFTypeRef) { [weak self] in
+                guard let port = self?.keyEventPort else { return }
+                CGEvent.tapEnable(tap: port, enable: onOff)
+            }
+            CFRunLoopWakeUp(runLoop)
         }
     }
 
@@ -74,7 +79,6 @@ final class MediaKeyTapInternals: Sendable {
     func startWatchingMediaKeys(restart: Bool = false) throws {
         let eventTapCallback: EventTapCallback = { [weak self] type, event in
             guard let self = self else { return event }
-
             if type == .tapDisabledByTimeout {
                 if let port = self.keyEventPort {
                     CGEvent.tapEnable(tap: port, enable: true)
@@ -89,20 +93,19 @@ final class MediaKeyTapInternals: Sendable {
             }
         }
 
-        callback = eventTapCallback
         try startKeyEventTap(callback: eventTapCallback, restart: restart)
+        callback = eventTapCallback
     }
 
     func stopWatchingMediaKeys() {
-        runLoopQueue.async { [weak self] in
-            guard let keyEventPort = self?.keyEventPort else {
-                return
-            }
-
-            RunLoop.current.remove(keyEventPort, forMode: .common)
+        if let runLoopSource = self.runLoopSource {
+            CFRunLoopSourceInvalidate(runLoopSource)
+        }
+        if let runLoop = self.runLoop {
+            CFRunLoopStop(runLoop)
+        }
+        if let keyEventPort = self.keyEventPort {
             CFMachPortInvalidate(keyEventPort)
-
-            self?.keyEventPort = nil
         }
     }
 
@@ -157,15 +160,20 @@ final class MediaKeyTapInternals: Sendable {
             delegate?.updateInterceptMediaKeys(true)
         }
 
-        guard let port = keyCaptureEventTapPort(callback: callback) else {
-            throw EventTapError.eventTapCreationFailure
-        }
-        runLoopQueue.async { [weak self] in
-            guard let self = self else { return }
+        keyEventPort = keyCaptureEventTapPort(callback: callback)
+        guard let port = keyEventPort else { throw EventTapError.eventTapCreationFailure }
 
-            self.keyEventPort = port
-            RunLoop.current.add(port, forMode: .common)
-            RunLoop.current.run()
+        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorSystemDefault, port, 0)
+        guard let source = runLoopSource else { throw EventTapError.runLoopSourceCreationFailure }
+
+        let queue = DispatchQueue(label: "MediaKeyTap Runloop", attributes: [])
+        runLoopQueue = queue
+
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.runLoop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(self.runLoop, source, CFRunLoopMode.commonModes)
+            CFRunLoopRun()
         }
     }
 
