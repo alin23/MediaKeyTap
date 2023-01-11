@@ -94,36 +94,45 @@ public final class MediaKeyTap: Sendable {
     }
 
     /// Start the key tap
-    public func start(tries: Int = 1) {
+    public func start(tries: Int = 1, onEnd: (() -> Void)? = nil) {
         retryTask?.invalidate()
-
-        mediaApplicationWatcher.delegate = self
-        mediaApplicationWatcher.start()
 
         internals.delegate = self
         do {
             try internals.startWatchingMediaKeys()
+            mediaApplicationWatcher.delegate = self
+            mediaApplicationWatcher.start()
+            onEnd?()
         } catch let error as EventTapError {
-            mediaApplicationWatcher.stop()
             print(error.description)
 
             guard tries != 1 else { return }
+            let key = "mediaKeyTapTryNum-\(keysToWatch)"
+            Thread.current.threadDictionary[key] = 1
             retryTask = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] timer in
                 guard let self = self else {
                     timer.invalidate()
+                    onEnd?()
                     return
                 }
 
-                var tryNum = (Thread.current.threadDictionary["mediaKeyTapTryNum"] as? Int) ?? 1
+                var tryNum = (Thread.current.threadDictionary[key] as? Int) ?? 1
                 tryNum += 1
-                Thread.current.threadDictionary["mediaKeyTapTryNum"] = tryNum
+                Thread.current.threadDictionary[key] = tryNum
 
-                self.mediaApplicationWatcher.start()
-                do { try self.internals.startWatchingMediaKeys() } catch is EventTapError { self.mediaApplicationWatcher.stop() } catch {}
-
-                if tryNum > tries {
-                    timer.invalidate()
+                do {
+                    try self.internals.startWatchingMediaKeys()
+                } catch {
+                    if tryNum > tries {
+                        timer.invalidate()
+                    }
+                    return
                 }
+
+                self.mediaApplicationWatcher.delegate = self
+                self.mediaApplicationWatcher.start()
+                timer.invalidate()
+                onEnd?()
             }
         } catch {
             print(error)
@@ -132,6 +141,7 @@ public final class MediaKeyTap: Sendable {
 
     /// Stop the key tap
     public func stop() {
+        retryTask?.invalidate()
         mediaApplicationWatcher.stop()
         internals.stopWatchingMediaKeys()
 
