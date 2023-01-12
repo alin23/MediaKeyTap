@@ -93,39 +93,30 @@ public class MediaKeyTap {
         mediaApplicationWatcher.activate()
     }
 
+    /// Retart the key tap
+    open func restart() {
+        guard started else {
+            start()
+            return
+        }
+        
+        do {
+            try internals.restartTap()
+        } catch {
+            print(error.localizedDescription)
+        }
+    }
+    
     /// Start the key tap
-    open func start(tries: Int = 1) {
-        retryTask?.invalidate()
-        var tryNum = 1
-
+    open func start() {
         mediaApplicationWatcher.delegate = self
-        mediaApplicationWatcher.start()
-
         internals.delegate = self
+        
         do {
             try internals.startWatchingMediaKeys()
-        } catch let error as EventTapError {
-            mediaApplicationWatcher.stop()
-            print(error.description)
-
-            guard tries != 1 else { return }
-            retryTask = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] timer in
-                guard let self = self else {
-                    timer.invalidate()
-                    return
-                }
-
-                tryNum += 1
-
-                self.mediaApplicationWatcher.start()
-                do { try self.internals.startWatchingMediaKeys() } catch is EventTapError { self.mediaApplicationWatcher.stop() } catch {}
-
-                if tryNum > tries {
-                    timer.invalidate()
-                }
-            }
+            mediaApplicationWatcher.start()
         } catch {
-            print(error)
+            print(error.localizedDescription)
         }
     }
 

@@ -50,6 +50,12 @@ class MediaKeyTapInternals {
     var callback: EventTapCallback?
     var runLoopQueue: DispatchQueue?
     var runLoop: CFRunLoop?
+    var id: String {
+        guard let delegate else { return "" }
+        let keyStr = delegate.keysToWatch.map({String(describing: $0)}).joined(separator: "-")
+        
+        return "\(keyStr)-\(delegate.observeBuiltIn)"
+    }
 
     deinit {
         stopWatchingMediaKeys()
@@ -166,7 +172,7 @@ class MediaKeyTapInternals {
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorSystemDefault, port, 0)
         guard let source = runLoopSource else { throw EventTapError.runLoopSourceCreationFailure }
 
-        let queue = DispatchQueue(label: "MediaKeyTap Runloop", attributes: [])
+        let queue = DispatchQueue(label: "MediaKeyTap Runloop \(id)", attributes: [])
         runLoopQueue = queue
 
         queue.async { [weak self] in
