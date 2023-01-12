@@ -50,6 +50,8 @@ class MediaKeyTapInternals {
     var callback: EventTapCallback?
     var runLoopQueue: DispatchQueue?
     var runLoop: CFRunLoop?
+    
+    var started: Bool = false
     var id: String {
         guard let delegate else { return "" }
         let keyStr = delegate.keysToWatch.map({String(describing: $0)}).joined(separator: "-")
@@ -83,6 +85,7 @@ class MediaKeyTapInternals {
     }
 
     func startWatchingMediaKeys(restart: Bool = false) throws {
+        guard !started else { return }
         let eventTapCallback: EventTapCallback = { [weak self] type, event in
             guard let self = self else { return event }
             if type == .tapDisabledByTimeout {
@@ -101,9 +104,13 @@ class MediaKeyTapInternals {
 
         try startKeyEventTap(callback: eventTapCallback, restart: restart)
         callback = eventTapCallback
+        started = true
     }
 
     func stopWatchingMediaKeys() {
+        guard started else { return }
+        started = false
+        
         if let runLoopSource = self.runLoopSource {
             CFRunLoopSourceInvalidate(runLoopSource)
         }
