@@ -16,6 +16,11 @@ protocol MediaApplicationWatcherDelegate: AnyObject {
 }
 
 class MediaApplicationWatcher {
+    init() {
+        mediaApps = []
+        dynamicWhitelist = []
+    }
+
     var started = false
     var mediaApps: [NSRunningApplication]
     weak var delegate: MediaApplicationWatcherDelegate?
@@ -25,11 +30,6 @@ class MediaApplicationWatcher {
 
     let mediaKeyTapDidStartNotification = "MediaKeyTapDidStart" // Sent on start()
     let mediaKeyTapReplyNotification = "MediaKeyTapReply" // Sent on receipt of a mediaKeyTapDidStartNotification
-
-    init() {
-        mediaApps = []
-        dynamicWhitelist = []
-    }
 
     /// Activate the currently running application (without an NSNotification)
     func activate() {
@@ -116,47 +116,6 @@ class MediaApplicationWatcher {
         }
     }
 
-    // MARK: - Notifications
-
-    @objc private func applicationLaunched(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            if inStaticWhitelist(application), application != NSRunningApplication.current {
-                delegate?.whitelistedAppStarted()
-            }
-        }
-    }
-
-    @objc private func applicationActivated(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            guard whitelisted(application) else { return }
-
-            handleApplicationActivation(application: application)
-        }
-    }
-
-    @objc private func applicationTerminated(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            mediaApps = mediaApps.filter { $0 != application }
-            updateKeyInterceptStatus()
-        }
-    }
-
-    // When activated, move `application` to the front of `mediaApps` and toggle the tap as necessary
-    private func handleApplicationActivation(application: NSRunningApplication) {
-        mediaApps = mediaApps.filter { $0 != application }
-        mediaApps.insert(application, at: 0)
-        updateKeyInterceptStatus()
-    }
-
-    private func updateKeyInterceptStatus() {
-        guard mediaApps.count > 0 else { return }
-
-        let activeApp = mediaApps.first!
-        let ownApp = NSRunningApplication.current
-
-        delegate?.updateIsActiveMediaApp(activeApp == ownApp)
-    }
-
     // MARK: - Identifier Whitelist
 
     // The static SPMediaKeyTap whitelist
@@ -201,6 +160,47 @@ class MediaApplicationWatcher {
         }
 
         return whitelist
+    }
+
+    // MARK: - Notifications
+
+    @objc private func applicationLaunched(_ notification: Notification) {
+        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            if inStaticWhitelist(application), application != NSRunningApplication.current {
+                delegate?.whitelistedAppStarted()
+            }
+        }
+    }
+
+    @objc private func applicationActivated(_ notification: Notification) {
+        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            guard whitelisted(application) else { return }
+
+            handleApplicationActivation(application: application)
+        }
+    }
+
+    @objc private func applicationTerminated(_ notification: Notification) {
+        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            mediaApps = mediaApps.filter { $0 != application }
+            updateKeyInterceptStatus()
+        }
+    }
+
+    // When activated, move `application` to the front of `mediaApps` and toggle the tap as necessary
+    private func handleApplicationActivation(application: NSRunningApplication) {
+        mediaApps = mediaApps.filter { $0 != application }
+        mediaApps.insert(application, at: 0)
+        updateKeyInterceptStatus()
+    }
+
+    private func updateKeyInterceptStatus() {
+        guard mediaApps.count > 0 else { return }
+
+        let activeApp = mediaApps.first!
+        let ownApp = NSRunningApplication.current
+
+        delegate?.updateIsActiveMediaApp(activeApp == ownApp)
     }
 
     private func inStaticWhitelist(_ application: NSRunningApplication) -> Bool {
