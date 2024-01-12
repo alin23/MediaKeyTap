@@ -12,31 +12,75 @@ import Cocoa
 import CoreGraphics
 
 class RunLoopThread: Thread {
-    init(mode: RunLoop.Mode, qualityOfService: QualityOfService? = nil, start: Bool = false) {
+    init(mode: RunLoop.Mode, qualityOfService: QualityOfService? = nil, machPort: CFMachPort) {
         self.mode = mode
         super.init()
-        if let qualityOfService = qualityOfService { self.qualityOfService = qualityOfService }
-        if start { self.start() }
+
+        if let qualityOfService {
+            self.qualityOfService = qualityOfService
+        }
+        self.machPort = machPort
+        start()
     }
 
-    private(set) var runLoop: RunLoop?
+    let serialQueue = DispatchQueue(label: "MediaKeyTapRunLoopQueue")
+    private(set) var runLoop: RunLoop!
+    @Atomic private(set) var stopped = true
+
+    func stop() {
+        stopped = true
+    }
+
+    func restart(machPort: CFMachPort) {
+        serialQueue.async { [self] in
+            stopSemaphore.wait()
+            machPortLock.withLock {
+                assert(self.machPort == nil, "Restarting thread with existing mach port")
+                self.machPort = machPort
+            }
+            stopped = false
+            restartSemaphore.signal()
+        }
+    }
 
     override func start() {
+        stopped = false
         super.start()
         startSemaphore.wait()
     }
 
     override func main() {
         runLoop = RunLoop.current
+        runLoop.add(machPort!, forMode: mode)
+
         startSemaphore.signal()
         while !isCancelled {
-            if !runLoop!.run(mode: mode, before: .distantFuture) {
-                Thread.sleep(forTimeInterval: 0.1)
+            guard !stopped else {
+                machPortLock.withLock {
+                    runLoop.remove(machPort!, forMode: self.mode)
+                    self.machPort = nil
+                }
+
+                stopSemaphore.signal()
+                restartSemaphore.wait()
+
+                machPortLock.withLock {
+                    runLoop.add(machPort!, forMode: self.mode)
+                }
+                continue
+            }
+            if !runLoop.run(mode: mode, before: Date().addingTimeInterval(1)) {
+                Thread.sleep(forTimeInterval: 0.01)
             }
         }
     }
 
+    private var machPort: CFMachPort?
+    private var machPortLock = NSRecursiveLock()
+
     private let startSemaphore = DispatchSemaphore(value: 0)
+    private let restartSemaphore = DispatchSemaphore(value: 0)
+    private let stopSemaphore = DispatchSemaphore(value: 0)
     private let mode: RunLoop.Mode
 }
 
@@ -122,7 +166,7 @@ class MediaKeyTapInternals {
 
     func startWatchingMediaKeys(restart: Bool = false) throws {
         try mainThreadThrows {
-            guard self.thread == nil else { return }
+            guard self.thread?.stopped ?? true else { return }
 
             let eventTapCallback: EventTapCallback = { [weak self] type, event in
                 guard let self = self else { return event }
@@ -149,10 +193,7 @@ class MediaKeyTapInternals {
         mainThread {
             guard let thread, let keyEventPort else { return }
 
-            thread.runLoop?.remove(keyEventPort, forMode: .default)
-            thread.cancel()
-            self.thread = nil
-
+            thread.stop()
             CGEvent.tapEnable(tap: keyEventPort, enable: false)
             self.keyEventPort = nil
             self.callback = nil
@@ -214,8 +255,11 @@ class MediaKeyTapInternals {
 
         keyEventPort = keyCaptureEventTapPort(callback: callback)
         guard let port = keyEventPort else { throw EventTapError.eventTapCreationFailure }
-        thread = RunLoopThread(mode: .default, qualityOfService: .userInteractive, start: true)
-        thread!.runLoop!.add(port, forMode: .default)
+        if let thread {
+            thread.restart(machPort: port)
+        } else {
+            thread = RunLoopThread(mode: .default, qualityOfService: .userInteractive, machPort: port)
+        }
     }
 
     private func keyCaptureEventTapPort(callback _: @escaping EventTapCallback) -> CFMachPort? {
