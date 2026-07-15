@@ -179,6 +179,18 @@ class MediaKeyTapInternals {
                     return event
                 }
 
+                // Fast path: this is a filtering `.defaultTap` over NX_KEYDOWN, so WindowServer waits
+                // on the callback's verdict for EVERY keystroke. Hopping to main (`mainThread` is
+                // `DispatchQueue.main.sync` when off-main) means any main-thread stall (e.g. a slow
+                // synchronous DDC write to an unresponsive display) blocks the callback and freezes
+                // all keyboard input system-wide. Only brightness media keys arrive as keyDown
+                // (`functionKeyCodeToMediaKey`), so bail immediately for every other key, never
+                // touching main. NX_SYSDEFINED (media) events still go through the handler.
+                if type == .keyDown,
+                   MediaKeyTap.functionKeyCodeToMediaKey(Int32(event.getIntegerValueField(.keyboardEventKeycode))) == nil {
+                    return event
+                }
+
                 return mainThread {
                     self.handle(event: event, ofType: type)
                 }
