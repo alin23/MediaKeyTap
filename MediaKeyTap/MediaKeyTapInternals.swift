@@ -207,6 +207,9 @@ class MediaKeyTapInternals {
 
             thread.stop()
             CGEvent.tapEnable(tap: keyEventPort, enable: false)
+            // CG keeps its own references to the port, so dropping ours never frees it:
+            // without this the disabled tap stays in the WindowServer tap table until the process exits
+            CFMachPortInvalidate(keyEventPort)
             self.keyEventPort = nil
             self.callback = nil
         }
