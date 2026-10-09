@@ -7,6 +7,7 @@
 //
 
 import Cocoa
+import os
 
 public enum MediaKey {
     case playPause
@@ -86,10 +87,14 @@ public class MediaKeyTap {
         } catch {
             print(error.localizedDescription)
         }
+        // Also when the tap could not be created: access granted later arrives
+        // as a permission change, and the rebuild brings the tap up.
+        tapGuard.start()
     }
 
     /// Stop the key tap
     open func stop() {
+        tapGuard.stop()
         mediaApplicationWatcher.stop()
         internals.stopWatchingMediaKeys()
 
@@ -98,6 +103,34 @@ public class MediaKeyTap {
     }
 
     public static var useAlternateBrightnessKeys = true
+
+    /// Takes the tap out of the event path when Accessibility is revoked and
+    /// rebuilds it after: a tap that outlives its permission keeps every media
+    /// key and the system discards its answers, freezing all input until the
+    /// app quits.
+    private lazy var tapGuard = EventTapGuard(
+        taps: { [box = internals.tapBox] in box.tap.map { [$0] } ?? [] },
+        rebuild: { [weak self] in self?.rebuildTap() },
+        log: { os_log("%{public}@", log: MediaKeyTap.log, type: .default, $0) }
+    )
+
+    private static let log = OSLog(subsystem: Bundle.main.bundleIdentifier ?? "MediaKeyTap", category: "MediaKeyTap")
+
+    private func rebuildTap() {
+        // A tap that never came up (no access at start) finishes starting
+        // here: it tells the delegate to intercept and starts the app watcher.
+        // A running one keeps whatever the app watcher decided since.
+        let neverStarted = !mediaApplicationWatcher.started
+        internals.stopWatchingMediaKeys()
+        do {
+            try internals.startWatchingMediaKeys(restart: !neverStarted)
+            if neverStarted {
+                mediaApplicationWatcher.start()
+            }
+        } catch {
+            print(error.localizedDescription)
+        }
+    }
 
     public var started: Bool {
         mediaApplicationWatcher.started

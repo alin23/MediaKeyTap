@@ -29,6 +29,10 @@ class RunLoopThread: Thread {
 
     func stop() {
         stopped = true
+        // Ends the current run now instead of at its 1s limit: a restart
+        // creates the new tap enabled, and until this thread adds it to its
+        // run loop nothing answers the tap and every key waits on it.
+        CFRunLoopStop(runLoop.getCFRunLoop())
     }
 
     func restart(machPort: CFMachPort) {
@@ -139,6 +143,8 @@ class MediaKeyTapInternals {
 
     weak var delegate: MediaKeyTapInternalsDelegate?
     var keyEventPort: CFMachPort?
+    /// `keyEventPort`, readable from the event tap guard's queue.
+    let tapBox = EventTapBox()
     var callback: EventTapCallback?
 
     var id: String {
@@ -171,7 +177,8 @@ class MediaKeyTapInternals {
             let eventTapCallback: EventTapCallback = { [weak self] type, event in
                 guard let self = self else { return event }
                 if type == .tapDisabledByTimeout {
-                    if let tap = self.keyEventPort {
+                    // Not one the event tap guard took down.
+                    if let tap = self.keyEventPort, CFMachPortIsValid(tap) {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
                     return event
@@ -208,6 +215,7 @@ class MediaKeyTapInternals {
             thread.stop()
             CGEvent.tapEnable(tap: keyEventPort, enable: false)
             self.keyEventPort = nil
+            self.tapBox.tap = nil
             self.callback = nil
         }
     }
@@ -267,6 +275,7 @@ class MediaKeyTapInternals {
 
         keyEventPort = keyCaptureEventTapPort(callback: callback)
         guard let port = keyEventPort else { throw EventTapError.eventTapCreationFailure }
+        tapBox.tap = port
         if let thread {
             thread.restart(machPort: port)
         } else {
