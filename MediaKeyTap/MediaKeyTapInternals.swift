@@ -29,10 +29,6 @@ class RunLoopThread: Thread {
 
     func stop() {
         stopped = true
-        // Ends the current run now instead of at its 1s limit: a restart
-        // creates the new tap enabled, and until this thread adds it to its
-        // run loop nothing answers the tap and every key waits on it.
-        CFRunLoopStop(runLoop.getCFRunLoop())
     }
 
     func restart(machPort: CFMachPort) {
