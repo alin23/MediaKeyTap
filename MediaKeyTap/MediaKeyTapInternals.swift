@@ -194,6 +194,17 @@ class MediaKeyTapInternals {
                     return event
                 }
 
+                // Same for NX_SYSDEFINED: the hardware sends one with every mouse button press and
+                // release (subtype 7), and WindowServer holds that click until this callback answers.
+                // The main queue runs one block at a time, so while it runs a modal alert from a
+                // block (Sparkle's "You're up to date") `mainThread` waited until the alert closed:
+                // the first click on the alert never arrived, and was delivered after it closed to
+                // whatever window was under the pointer, as a press with no release. Only media key
+                // events need the handler, so every other system-defined event returns here.
+                if type.rawValue == UInt32(NX_SYSDEFINED), !(NSEvent(cgEvent: event)?.isMediaKeyEvent ?? false) {
+                    return event
+                }
+
                 return mainThread {
                     self.handle(event: event, ofType: type)
                 }
