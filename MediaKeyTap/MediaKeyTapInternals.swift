@@ -201,7 +201,10 @@ class MediaKeyTapInternals {
                 // the first click on the alert never arrived, and was delivered after it closed to
                 // whatever window was under the pointer, as a press with no release. Only media key
                 // events need the handler, so every other system-defined event returns here.
-                if type.rawValue == UInt32(NX_SYSDEFINED), !(NSEvent(cgEvent: event)?.isMediaKeyEvent ?? false) {
+                // The check reads the event's fields: an NSEvent made on this thread from a Caps Lock
+                // release crashes (see `isMediaKeySystemEvent`). When the fields read empty, the event
+                // goes to the handler on main, as every system-defined event did before.
+                if type.rawValue == UInt32(NX_SYSDEFINED), event.isMediaKeySystemEvent == false {
                     return event
                 }
 
