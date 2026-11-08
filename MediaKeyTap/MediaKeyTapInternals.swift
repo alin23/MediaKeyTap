@@ -141,7 +141,26 @@ class MediaKeyTapInternals {
     var keyEventPort: CFMachPort?
     /// `keyEventPort`, readable from the event tap guard's queue.
     let tapBox = EventTapBox()
-    var callback: EventTapCallback?
+
+    /// The tap thread reads this for every event while a restart on the main thread sets it to nil
+    /// and then to a new block. Unguarded, the read could copy a block that the write had just
+    /// released, and the app crashed in `_Block_copy` or `swift_release`. Under the lock, the tap
+    /// thread holds its own reference to the block while it runs it.
+    var callback: EventTapCallback? {
+        get {
+            callbackLock.lock()
+            defer { callbackLock.unlock() }
+            return storedCallback
+        }
+        set {
+            callbackLock.lock()
+            defer { callbackLock.unlock() }
+            storedCallback = newValue
+        }
+    }
+
+    private var storedCallback: EventTapCallback?
+    private let callbackLock = NSLock()
 
     var id: String {
         guard let delegate else { return "" }
@@ -173,8 +192,9 @@ class MediaKeyTapInternals {
             let eventTapCallback: EventTapCallback = { [weak self] type, event in
                 guard let self = self else { return event }
                 if type == .tapDisabledByTimeout {
-                    // Not one the event tap guard took down.
-                    if let tap = self.keyEventPort, CFMachPortIsValid(tap) {
+                    // Not one the event tap guard took down. `tapBox` and not `keyEventPort`, which
+                    // the main thread writes without a lock.
+                    if let tap = self.tapBox.tap, CFMachPortIsValid(tap) {
                         CGEvent.tapEnable(tap: tap, enable: true)
                     }
                     return event
@@ -297,7 +317,9 @@ class MediaKeyTapInternals {
         let cCallback: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else { return nil }
             let tap = CUtil.bridge(ptr: refcon) as MediaKeyTapInternals
-            return tap.callback?(type, event).map(Unmanaged.passUnretained)
+            // Stopped between the event and this call: pass the event on rather than drop the key.
+            guard let callback = tap.callback else { return Unmanaged.passUnretained(event) }
+            return callback(type, event).map(Unmanaged.passUnretained)
         }
 
         return CGEvent.tapCreate(
