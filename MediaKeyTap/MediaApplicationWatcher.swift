@@ -164,26 +164,46 @@ class MediaApplicationWatcher {
 
     // MARK: - Notifications
 
+    // The first read of an app's `bundleIdentifier` is a synchronous request to launchservicesd,
+    // which can wait for tens of seconds while that daemon is busy. The handlers below read it on
+    // this queue and go back to the main queue with the result. Terminations take the same path,
+    // so that an app that quits right after it was activated is removed after it was added.
+    private let bundleIDQueue = DispatchQueue(label: "MediaKeyTap.MediaApplicationWatcher.bundleID", qos: .utility)
+
     @objc private func applicationLaunched(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            if inStaticWhitelist(application), application != NSRunningApplication.current {
-                delegate?.whitelistedAppStarted()
-            }
+        guard let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              application != NSRunningApplication.current
+        else { return }
+
+        bundleIDQueue.async { [weak self] in
+            guard let self, let id = application.bundleIdentifier, self.whitelistedApplicationIdentifiers().contains(id) else { return }
+            DispatchQueue.main.async { self.delegate?.whitelistedAppStarted() }
         }
     }
 
     @objc private func applicationActivated(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            guard whitelisted(application) else { return }
+        guard let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        else { return }
 
-            handleApplicationActivation(application: application)
+        bundleIDQueue.async { [weak self] in
+            guard let id = application.bundleIdentifier else { return }
+            DispatchQueue.main.async {
+                guard let self, self.whitelistedApplicationIdentifiers().contains(id) || self.dynamicWhitelist.contains(id) else { return }
+                self.handleApplicationActivation(application: application)
+            }
         }
     }
 
     @objc private func applicationTerminated(_ notification: Notification) {
-        if let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            mediaApps = mediaApps.filter { $0 != application }
-            updateKeyInterceptStatus()
+        guard let application = (notification as NSNotification).userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        else { return }
+
+        bundleIDQueue.async { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.mediaApps = self.mediaApps.filter { $0 != application }
+                self.updateKeyInterceptStatus()
+            }
         }
     }
 
@@ -201,19 +221,5 @@ class MediaApplicationWatcher {
         let ownApp = NSRunningApplication.current
 
         delegate?.updateIsActiveMediaApp(activeApp == ownApp)
-    }
-
-    private func inStaticWhitelist(_ application: NSRunningApplication) -> Bool {
-        guard let id = application.bundleIdentifier else { return false }
-        return whitelistedApplicationIdentifiers().contains(id)
-    }
-
-    private func inDynamicWhitelist(_ application: NSRunningApplication) -> Bool {
-        guard let id = application.bundleIdentifier else { return false }
-        return dynamicWhitelist.contains(id)
-    }
-
-    private func whitelisted(_ application: NSRunningApplication) -> Bool {
-        inStaticWhitelist(application) || inDynamicWhitelist(application)
     }
 }
