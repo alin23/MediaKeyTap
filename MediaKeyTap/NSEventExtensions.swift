@@ -55,14 +55,24 @@ extension CGEvent {
         getIntegerValueField(CGEventField(rawValue: 99)!)
     }
 
+    /// Read it only after checking the subtype. Field 149 is the first of the compound data fields,
+    /// and SkyLight asserts `event_carries_compound_data_field(event)` before it reads one. A
+    /// system-defined event of subtype 6 or 9 carries none, so reading it stops the app with
+    /// SIGABRT (macOS 26.7 and 27.2).
     var systemDefinedData1: Int64 {
         getIntegerValueField(CGEventField(rawValue: 149)!)
     }
 
     /// Whether a system-defined event is a media key, or nil when both fields read 0 and only an
     /// NSEvent made on the main thread can tell.
+    ///
+    /// Media keys have subtype 8 (NX_SUBTYPE_AUX_CONTROL_BUTTONS), so any other non-zero subtype
+    /// is not one and its data word is never read. The data word is read for subtype 0 only to
+    /// tell an empty event from one that is not a media key.
     var isMediaKeySystemEvent: Bool? {
         let subtype = systemDefinedSubtype
+        guard subtype == 8 || subtype == 0 else { return false }
+
         let data1 = systemDefinedData1
         guard subtype != 0 || data1 != 0 else { return nil }
 
