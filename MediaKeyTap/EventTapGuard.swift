@@ -1,7 +1,7 @@
 //
 //  EventTapGuard.swift
 //
-//  Self-contained (AppKit and CoreGraphics only), so the same file can be
+//  Self-contained (AppKit, CoreGraphics and notify only), so the same file can be
 //  copied into any app that runs an active CGEvent tap. `nonisolated` keeps it
 //  off the main actor in targets that make that the default isolation, and
 //  `Dispatch.DispatchWorkItem` is spelled out for apps that define their own.
@@ -10,6 +10,9 @@
 import AppKit
 import CoreGraphics
 import Dispatch
+import notify
+
+// MARK: - EventTapGuard
 
 /// Keeps an active CGEvent tap from freezing the keyboard and mouse when the
 /// app's Accessibility permission is revoked.
@@ -31,6 +34,18 @@ import Dispatch
 /// is the dead one again. A rebuild costs milliseconds and these changes are
 /// rare, so every one rebuilds, whichever app it was for.
 ///
+/// macOS can also revoke Accessibility without that notification: `tccutil
+/// reset`, a configuration profile, a reset of the privacy database. On macOS
+/// 27.2, `AXIsProcessTrusted`, `CGPreflightPostEventAccess` and AX
+/// reads then kept answering as granted for as long as the revoke lasted, and
+/// the taps blocked every key, click and scroll they covered. tccd posts the
+/// `com.apple.tcc.access.changed` Darwin notification within milliseconds of
+/// any privacy change, for any app and any service. So on that one the guard
+/// asks whether an active tap can still be created, a few times over the next
+/// seconds because the WindowServer applies the change about a second later.
+/// It takes the taps down only when creation fails, and asks for a rebuild
+/// once a later change makes creation work again.
+///
 /// No timer runs: the guard costs nothing until a permission changes.
 ///
 /// Adopting it:
@@ -49,8 +64,10 @@ import Dispatch
 ///    change calls it again. The guard has already disabled and invalidated
 ///    the current taps when it runs.
 /// 4. `.tapDisabledByUserInput` also reaches a tap's callback when it is
-///    disabled on purpose. Don't re-enable a tap that is no longer valid
-///    (`CFMachPortIsValid`), and don't let a health check re-enable one either.
+///    disabled on purpose. Re-enable a tap from a callback or a health check
+///    with `EventTapGuard.enable(_:)` and probe it with `isEnabled(_:)`, never
+///    with `CGEvent.tapEnable` directly: those skip a tap that is no longer
+///    valid, and wait while another thread is stopping it (see `whileLive`).
 /// 5. If the app already reads `AXIsProcessTrusted()` periodically, call
 ///    `accessLost()` when it reads false. One more way in, never the only one.
 /// 6. Keep a strong reference to the guard, call `start()` once the taps are up
@@ -59,9 +76,10 @@ import Dispatch
 /// The distributed notification is observed with `.deliverImmediately`: AppKit
 /// holds distributed notifications while an app is inactive, and a menu bar app
 /// almost never is active.
-/// `@unchecked Sendable`: the closures are immutable and `observing` and
-/// `pendingRebuilds` are only touched on the main thread.
-nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
+/// `@unchecked Sendable`: the closures are immutable, `observing`,
+/// `pendingRebuilds`, `pendingChecks` and `privacyToken` are only touched on
+/// the main thread, and `revokedTapsDown` only on `checkQueue`.
+final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
     init(
         taps: @escaping @Sendable () -> [CFMachPort],
         rebuild: @escaping @MainActor () -> Void,
@@ -74,6 +92,27 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
 
     static let accessibilityChanged = NSNotification.Name("com.apple.accessibility.api")
     static let rebuildDelays: [TimeInterval] = [0.3, 1.5]
+    /// Posted by tccd for every privacy change (see the type's comment).
+    static let privacyChanged = "com.apple.tcc.access.changed"
+    /// The WindowServer refused new taps about 1 to 3 seconds after the
+    /// change, so the check runs until 4 seconds after it.
+    static let privacyCheckDelays: [TimeInterval] = [0.3, 1, 2, 4]
+
+    /// Whether macOS lets this app create an active tap, which it refuses while
+    /// Accessibility is gone. The probe takes an event type that a session
+    /// barely sees and lives for a fraction of a millisecond.
+    static func activeTapAllowed() -> Bool {
+        guard let probe = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .tailAppendEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(1) << CGEventMask(NX_KITDEFINED),
+            callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
+            userInfo: nil
+        ) else { return false }
+        stop(probe)
+        return true
+    }
 
     /// Run `tap` on a thread of its own and enable it. The thread ends when the
     /// tap is invalidated, which removes the run loop's only source.
@@ -87,14 +126,49 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
         thread.name = name
         thread.qualityOfService = .userInteractive
         thread.start()
-        CGEvent.tapEnable(tap: tap, enable: true)
+        enable(tap)
     }
 
     /// Take `tap` out of the event path for good: disable first, then
     /// invalidate. Safe from any thread.
     static func stop(_ tap: CFMachPort) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard CFMachPortIsValid(tap) else { return }
         CGEvent.tapEnable(tap: tap, enable: false)
         CFMachPortInvalidate(tap)
+    }
+
+    /// Turn `tap` on, unless it was invalidated. Safe from any thread.
+    static func enable(_ tap: CFMachPort) {
+        whileLive(tap) { CGEvent.tapEnable(tap: tap, enable: true) }
+    }
+
+    /// Whether the WindowServer has `tap` enabled, or nil once it was
+    /// invalidated. A synchronous WindowServer round trip. Safe from any thread.
+    static func isEnabled(_ tap: CFMachPort) -> Bool? {
+        whileLive(tap) { CGEvent.tapIsEnabled(tap: tap) }
+    }
+
+    /// Runs `body` while `tap` can't be invalidated by `stop`, and only if it
+    /// is still valid. Every `CGEvent.tapEnable` or `CGEvent.tapIsEnabled` on a
+    /// tap that another thread may stop goes through here.
+    ///
+    /// SkyLight keeps a tap's state in the port's context, and invalidating the
+    /// port frees that state. Both calls read it, wait for the WindowServer's
+    /// answer and then read it again, so a tap invalidated on another thread
+    /// during that wait left them reading freed memory: EXC_BAD_ACCESS in
+    /// `SLEventTapEnable` from a health check or a re-enable in a callback
+    /// while the taps were being rebuilt. `CFMachPortIsValid` alone can't
+    /// prevent it, because the port can be invalidated right after the check.
+    /// After the invalidation the calls find no state and do nothing, so only
+    /// the overlap needs the lock.
+    @discardableResult
+    static func whileLive<T>(_ tap: CFMachPort, _ body: () -> T) -> T? {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard CFMachPortIsValid(tap) else { return nil }
+        return body()
     }
 
     func start() {
@@ -107,13 +181,24 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
             object: nil,
             suspensionBehavior: .deliverImmediately
         )
+        var token: Int32 = 0
+        if notify_register_dispatch(Self.privacyChanged, &token, .main, { [weak self] _ in self?.scheduleChecks() }) == NOTIFY_STATUS_OK {
+            privacyToken = token
+        }
     }
 
     func stop() {
         guard observing else { return }
         observing = false
         DistributedNotificationCenter.default().removeObserver(self, name: Self.accessibilityChanged, object: nil)
-        DispatchQueue.main.async { self.cancelRebuilds() }
+        DispatchQueue.main.async {
+            if let token = self.privacyToken {
+                notify_cancel(token)
+                self.privacyToken = nil
+            }
+            self.cancelRebuilds()
+            self.cancelChecks()
+        }
     }
 
     /// Take the taps down without waiting for a notification, for an app that
@@ -123,6 +208,10 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
         queue.async { self.takeDown("Accessibility reads as revoked") }
     }
 
+    /// Held for one tap call or one invalidation at a time, never while waiting
+    /// on the main thread.
+    private static let lifecycleLock = NSLock()
+
     private let taps: @Sendable () -> [CFMachPort]
     private let rebuild: @MainActor () -> Void
     private let log: @Sendable (String) -> Void
@@ -130,6 +219,14 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
     private var observing = false
     /// Main thread only, so a burst of notifications ends in one set of rebuilds.
     private var pendingRebuilds: [Dispatch.DispatchWorkItem] = []
+    /// Main thread only, for the same reason.
+    private var pendingChecks: [Dispatch.DispatchWorkItem] = []
+    private var privacyToken: Int32?
+    /// The probe runs here and not on `queue`, so a WindowServer call that
+    /// hangs can't hold up a take-down.
+    private let checkQueue = DispatchQueue(label: "EventTapGuard check", qos: .userInitiated)
+    /// The taps were taken down because a probe failed. `checkQueue` only.
+    private var revokedTapsDown = false
 
     @objc private func accessibilityDidChange() {
         queue.async { self.takeDown("Accessibility permissions changed") }
@@ -171,10 +268,47 @@ nonisolated final class EventTapGuard: NSObject, @unchecked Sendable {
         pendingRebuilds.forEach { $0.cancel() }
         pendingRebuilds = []
     }
+
+    /// Main thread: a privacy change, for any app or service. Checks over the
+    /// next seconds, and a new change starts the checks over.
+    private func scheduleChecks() {
+        cancelChecks()
+        pendingChecks = Self.privacyCheckDelays.map { delay in
+            let item = Dispatch.DispatchWorkItem { [weak self] in
+                guard let self, observing else { return }
+                checkQueue.async { self.checkAccess() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+            return item
+        }
+    }
+
+    private func cancelChecks() {
+        pendingChecks.forEach { $0.cancel() }
+        pendingChecks = []
+    }
+
+    /// `checkQueue`: takes the taps down when a tap can't be created, and asks
+    /// for them back once one can.
+    private func checkAccess() {
+        if Self.activeTapAllowed() {
+            guard revokedTapsDown else { return }
+            revokedTapsDown = false
+            log("Accessibility is back, rebuilding the event taps")
+            DispatchQueue.main.async {
+                guard self.observing else { return }
+                MainActor.assumeIsolated { self.rebuild() }
+            }
+        } else if takeDown("Accessibility was revoked without the change notification") > 0 {
+            revokedTapsDown = true
+        }
+    }
 }
 
+// MARK: - EventTapBox
+
 /// A tap reference readable from any thread, for `EventTapGuard`'s `taps`.
-nonisolated final class EventTapBox: @unchecked Sendable {
+final nonisolated class EventTapBox: @unchecked Sendable {
     var tap: CFMachPort? {
         get {
             lock.lock()
