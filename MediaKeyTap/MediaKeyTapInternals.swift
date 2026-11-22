@@ -11,79 +11,6 @@
 import Cocoa
 import CoreGraphics
 
-class RunLoopThread: Thread {
-    init(mode: RunLoop.Mode, qualityOfService: QualityOfService? = nil, machPort: CFMachPort) {
-        self.mode = mode
-        super.init()
-
-        if let qualityOfService {
-            self.qualityOfService = qualityOfService
-        }
-        self.machPort = machPort
-        start()
-    }
-
-    let serialQueue = DispatchQueue(label: "MediaKeyTapRunLoopQueue")
-    private(set) var runLoop: RunLoop!
-    @Atomic private(set) var stopped = true
-
-    func stop() {
-        stopped = true
-    }
-
-    func restart(machPort: CFMachPort) {
-        serialQueue.async { [self] in
-            stopSemaphore.wait()
-            machPortLock.withLock {
-                assert(self.machPort == nil, "Restarting thread with existing mach port")
-                self.machPort = machPort
-            }
-            stopped = false
-            restartSemaphore.signal()
-        }
-    }
-
-    override func start() {
-        stopped = false
-        super.start()
-        startSemaphore.wait()
-    }
-
-    override func main() {
-        runLoop = RunLoop.current
-        runLoop.add(machPort!, forMode: mode)
-
-        startSemaphore.signal()
-        while !isCancelled {
-            guard !stopped else {
-                machPortLock.withLock {
-                    runLoop.remove(machPort!, forMode: self.mode)
-                    self.machPort = nil
-                }
-
-                stopSemaphore.signal()
-                restartSemaphore.wait()
-
-                machPortLock.withLock {
-                    runLoop.add(machPort!, forMode: self.mode)
-                }
-                continue
-            }
-            if !runLoop.run(mode: mode, before: Date().addingTimeInterval(1)) {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-        }
-    }
-
-    private var machPort: CFMachPort?
-    private var machPortLock = NSRecursiveLock()
-
-    private let startSemaphore = DispatchSemaphore(value: 0)
-    private let restartSemaphore = DispatchSemaphore(value: 0)
-    private let stopSemaphore = DispatchSemaphore(value: 0)
-    private let mode: RunLoop.Mode
-}
-
 enum EventTapError: Error {
     case eventTapCreationFailure
     case runLoopSourceCreationFailure
@@ -174,7 +101,7 @@ class MediaKeyTapInternals {
      */
     func enableTap(_ onOff: Bool) {
         guard let tap = keyEventPort else { return }
-        CGEvent.tapEnable(tap: tap, enable: onOff)
+        EventTapGuard.whileLive(tap) { CGEvent.tapEnable(tap: tap, enable: onOff) }
     }
 
     /**
@@ -187,15 +114,20 @@ class MediaKeyTapInternals {
 
     func startWatchingMediaKeys(restart: Bool = false) throws {
         try mainThreadThrows {
-            guard self.thread?.stopped ?? true else { return }
+            if let port = self.keyEventPort {
+                // Still running. One that the event tap guard invalidated is cleared and
+                // created again.
+                guard !CFMachPortIsValid(port) else { return }
+                self.stopWatchingMediaKeys()
+            }
 
             let eventTapCallback: EventTapCallback = { [weak self] type, event in
                 guard let self = self else { return event }
                 if type == .tapDisabledByTimeout {
                     // Not one the event tap guard took down. `tapBox` and not `keyEventPort`, which
                     // the main thread writes without a lock.
-                    if let tap = self.tapBox.tap, CFMachPortIsValid(tap) {
-                        CGEvent.tapEnable(tap: tap, enable: true)
+                    if let tap = self.tapBox.tap {
+                        EventTapGuard.enable(tap)
                     }
                     return event
                 } else if type == .tapDisabledByUserInput {
@@ -240,17 +172,18 @@ class MediaKeyTapInternals {
 
     func stopWatchingMediaKeys() {
         mainThread {
-            guard let thread, let keyEventPort else { return }
+            guard let keyEventPort else { return }
 
-            thread.stop()
-            CGEvent.tapEnable(tap: keyEventPort, enable: false)
+            // Disabled and invalidated. A tap that was only disabled stayed in the WindowServer's
+            // list until the app quit, one more for every restart, and with thousands of them
+            // the WindowServer lagged behind the pointer. The invalidation also ends the tap's
+            // thread.
+            EventTapGuard.stop(keyEventPort)
             self.keyEventPort = nil
             self.tapBox.tap = nil
             self.callback = nil
         }
     }
-
-    private var thread: RunLoopThread?
 
     private func handle(event: CGEvent, ofType type: CGEventType) -> CGEvent? {
         if type == .keyDown {
@@ -303,14 +236,12 @@ class MediaKeyTapInternals {
             delegate?.updateInterceptMediaKeys(true)
         }
 
-        keyEventPort = keyCaptureEventTapPort(callback: callback)
-        guard let port = keyEventPort else { throw EventTapError.eventTapCreationFailure }
+        guard let port = keyCaptureEventTapPort(callback: callback) else { throw EventTapError.eventTapCreationFailure }
+        keyEventPort = port
         tapBox.tap = port
-        if let thread {
-            thread.restart(machPort: port)
-        } else {
-            thread = RunLoopThread(mode: .default, qualityOfService: .userInteractive, machPort: port)
-        }
+        // On a thread of its own, which ends when `stopWatchingMediaKeys` or the event tap guard
+        // invalidates the tap.
+        EventTapGuard.run(port, name: "MediaKeyTap")
     }
 
     private func keyCaptureEventTapPort(callback _: @escaping EventTapCallback) -> CFMachPort? {

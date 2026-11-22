@@ -114,14 +114,17 @@ final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
         return true
     }
 
-    /// Run `tap` on a thread of its own and enable it. The thread ends when the
-    /// tap is invalidated, which removes the run loop's only source.
+    /// Run `tap` on a thread of its own and enable it. The thread ends when
+    /// `stop` invalidates the tap and stops the thread's run loop.
     static func run(_ tap: CFMachPort, name: String) {
         guard let created = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else { return }
         nonisolated(unsafe) let source = created
+        nonisolated(unsafe) let port = tap
         let thread = Thread {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+            guard let runLoop = CFRunLoopGetCurrent(), register(port, on: runLoop) else { return }
+            CFRunLoopAddSource(runLoop, source, .commonModes)
             CFRunLoopRun()
+            unregister(port)
         }
         thread.name = name
         thread.qualityOfService = .userInteractive
@@ -137,6 +140,12 @@ final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
         guard CFMachPortIsValid(tap) else { return }
         CGEvent.tapEnable(tap: tap, enable: false)
         CFMachPortInvalidate(tap)
+        // The invalidation takes the source out of the run loop without waking
+        // it, and a thread that was waiting for the next event kept waiting, one
+        // more thread for every tap that was stopped.
+        if let runLoop = runLoops.first(where: { $0.tap === tap })?.runLoop {
+            CFRunLoopStop(runLoop)
+        }
     }
 
     /// Turn `tap` on, unless it was invalidated. Safe from any thread.
@@ -211,6 +220,25 @@ final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
     /// Held for one tap call or one invalidation at a time, never while waiting
     /// on the main thread.
     private static let lifecycleLock = NSLock()
+    /// The run loop of each tap started with `run`, for `stop`. Under
+    /// `lifecycleLock`.
+    nonisolated(unsafe) private static var runLoops: [(tap: CFMachPort, runLoop: CFRunLoop)] = []
+
+    /// Records the run loop of a tap's thread, unless the tap was stopped
+    /// before the thread started.
+    private static func register(_ tap: CFMachPort, on runLoop: CFRunLoop) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard CFMachPortIsValid(tap) else { return false }
+        runLoops.append((tap, runLoop))
+        return true
+    }
+
+    private static func unregister(_ tap: CFMachPort) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        runLoops.removeAll { $0.tap === tap }
+    }
 
     private let taps: @Sendable () -> [CFMachPort]
     private let rebuild: @MainActor () -> Void
