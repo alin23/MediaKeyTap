@@ -222,23 +222,7 @@ final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
     private static let lifecycleLock = NSLock()
     /// The run loop of each tap started with `run`, for `stop`. Under
     /// `lifecycleLock`.
-    nonisolated(unsafe) private static var runLoops: [(tap: CFMachPort, runLoop: CFRunLoop)] = []
-
-    /// Records the run loop of a tap's thread, unless the tap was stopped
-    /// before the thread started.
-    private static func register(_ tap: CFMachPort, on runLoop: CFRunLoop) -> Bool {
-        lifecycleLock.lock()
-        defer { lifecycleLock.unlock() }
-        guard CFMachPortIsValid(tap) else { return false }
-        runLoops.append((tap, runLoop))
-        return true
-    }
-
-    private static func unregister(_ tap: CFMachPort) {
-        lifecycleLock.lock()
-        defer { lifecycleLock.unlock() }
-        runLoops.removeAll { $0.tap === tap }
-    }
+    private nonisolated(unsafe) static var runLoops: [(tap: CFMachPort, runLoop: CFRunLoop)] = []
 
     private let taps: @Sendable () -> [CFMachPort]
     private let rebuild: @MainActor () -> Void
@@ -255,6 +239,22 @@ final nonisolated class EventTapGuard: NSObject, @unchecked Sendable {
     private let checkQueue = DispatchQueue(label: "EventTapGuard check", qos: .userInitiated)
     /// The taps were taken down because a probe failed. `checkQueue` only.
     private var revokedTapsDown = false
+
+    /// Records the run loop of a tap's thread, unless the tap was stopped
+    /// before the thread started.
+    private static func register(_ tap: CFMachPort, on runLoop: CFRunLoop) -> Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard CFMachPortIsValid(tap) else { return false }
+        runLoops.append((tap, runLoop))
+        return true
+    }
+
+    private static func unregister(_ tap: CFMachPort) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        runLoops.removeAll { $0.tap === tap }
+    }
 
     @objc private func accessibilityDidChange() {
         queue.async { self.takeDown("Accessibility permissions changed") }
